@@ -727,10 +727,12 @@ fn apply_effects_from_block_movements(entity: &dyn Entity, movements: &[EntityMo
 }
 
 mod ageable;
+mod ageable_water_creature;
 pub(crate) mod ai;
 mod animal;
 pub mod attribute;
 mod base;
+pub(crate) mod block_danger;
 mod block_effects;
 mod callback;
 mod combat_rules;
@@ -759,6 +761,8 @@ mod movement_sync;
 pub mod projectile;
 mod registry;
 mod spawn;
+pub mod spawn_placements;
+mod squid_movement;
 mod storage;
 mod synced_data;
 mod ticking;
@@ -769,6 +773,7 @@ use crate::portal::{
     TeleportTransition, WorldChangeRequest, portal_shape::PortalShape,
 };
 pub(crate) use ageable::{AgeableMob, AgeableMobBase};
+pub(crate) use ageable_water_creature::AgeableWaterCreature;
 pub(crate) use animal::{Animal, AnimalBase};
 pub use base::{
     DEFAULT_MAX_AIR_SUPPLY, DEFAULT_TICKS_REQUIRED_TO_FREEZE, EntityAmethystStepSound, EntityBase,
@@ -817,6 +822,7 @@ pub use projectile::{
 };
 pub use registry::{ENTITIES, EntityLoadRequest, EntityRegistry, init_entities};
 pub(crate) use spawn::{AgeableMobGroupData, EntitySpawnReason, SpawnGroupData};
+pub(crate) use squid_movement::SquidMovementVector;
 pub(crate) use storage::{EntityStorage, EntityStorageAddResult};
 pub use synced_data::{EntitySyncedData, LivingEntitySyncedData};
 pub(crate) use ticking::{

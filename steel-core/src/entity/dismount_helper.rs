@@ -10,12 +10,12 @@ use steel_registry::blocks::{
 };
 use steel_registry::entity_data::EntityPose;
 use steel_registry::vanilla_block_tags::BlockTag;
-use steel_registry::{vanilla_blocks, vanilla_entities};
-use steel_utils::{BlockPos, BlockStateId, WorldAabb, axis::Axis};
+use steel_registry::vanilla_entities;
+use steel_utils::{BlockPos, WorldAabb, axis::Axis};
 
 use crate::behavior::{BLOCK_BEHAVIORS, BlockCollisionContext};
 use crate::entity::Entity;
-use crate::entity::ai::walk::WalkPathEvaluator;
+use crate::entity::block_danger::is_block_dangerous;
 use crate::physics::{CollisionWorld, WorldCollisionProvider};
 use crate::world::World;
 
@@ -104,7 +104,8 @@ pub(crate) fn find_safe_dismount_location(
     block_pos: BlockPos,
     check_dangerous: bool,
 ) -> Option<DVec3> {
-    if check_dangerous && is_block_dangerous(entity, world.get_block_state(block_pos)) {
+    if check_dangerous && is_block_dangerous(entity.entity_type(), world.get_block_state(block_pos))
+    {
         return None;
     }
 
@@ -118,7 +119,10 @@ pub(crate) fn find_safe_dismount_location(
 
     if check_dangerous
         && floor_height <= 0.0
-        && is_block_dangerous(entity, world.get_block_state(block_pos.below()))
+        && is_block_dangerous(
+            entity.entity_type(),
+            world.get_block_state(block_pos.below()),
+        )
     {
         return None;
     }
@@ -199,17 +203,4 @@ fn block_floor_height(block_shape: OffsetVoxelShape, below_block_shape: OffsetVo
 
 fn is_block_floor_valid(block_floor_height: f64) -> bool {
     !block_floor_height.is_infinite() && block_floor_height < 1.0
-}
-
-fn is_block_dangerous(entity: &dyn Entity, state: BlockStateId) -> bool {
-    // TODO: mirror vanilla entitytype.immuneto when the entity types carry entity specific immune block tag
-    if !entity.fire_immune() && WalkPathEvaluator::is_burning_block(state) {
-        return true;
-    }
-
-    let block = state.get_block();
-    block == &vanilla_blocks::WITHER_ROSE
-        || block == &vanilla_blocks::SWEET_BERRY_BUSH
-        || block == &vanilla_blocks::CACTUS
-        || block == &vanilla_blocks::POWDER_SNOW
 }

@@ -58,7 +58,8 @@ pub const REGION_MAGIC: [u8; 4] = *b"STLR";
 /// v20: Added chunk-owned light section persistence.
 /// v21: Matched vanilla scheduled-tick persistence by rebuilding sub-tick order on load.
 /// v22: Preserve Vanilla pending `DUMMY` block entities across chunk stages.
-pub const FORMAT_VERSION: u16 = 22;
+/// v23: Added chunk `inhabitedTime` persistence.
+pub const FORMAT_VERSION: u16 = 23;
 
 /// Number of chunks per region side (32×32 = 1024 chunks per region).
 pub const REGION_SIZE: usize = 32;
@@ -391,6 +392,8 @@ pub struct PersistentChunk<'a> {
     pub structure_references: Vec<PersistentStructureReference>,
     /// POI occupancy data (ticket state for beds, workstations, etc.).
     pub pois: Vec<PersistentPoi>,
+    /// Vanilla `InhabitedTime`: game ticks a player has spent near this chunk.
+    pub inhabited_time: i64,
 }
 
 /// A 16×16×16 section of a chunk.

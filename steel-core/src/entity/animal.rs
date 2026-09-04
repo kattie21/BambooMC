@@ -6,7 +6,6 @@ use simdnbt::borrow::NbtCompound as BorrowedNbtCompoundView;
 use simdnbt::owned::{NbtCompound, NbtTag};
 use steel_registry::blocks::block_state_ext::BlockStateExt as _;
 use steel_registry::item_stack::ItemStack;
-use steel_registry::vanilla_block_tags::BlockTag;
 use steel_registry::vanilla_blocks;
 use steel_registry::vanilla_game_rules::MOB_DROPS;
 use steel_utils::entity_events::EntityStatus;
@@ -18,6 +17,7 @@ use uuid::Uuid;
 use crate::behavior::InteractionResult;
 use crate::entity::ai::path::PathType;
 use crate::entity::entities::ExperienceOrbEntity;
+use crate::entity::spawn_placements;
 use crate::entity::{
     AgeableMob, AgeableMobBase, ENTITIES, EntitySpawnReason, Mob, MobBase, SharedEntity,
     next_entity_id,
@@ -188,14 +188,23 @@ pub trait Animal: AgeableMob {
     }
 
     /// Returns vanilla `Animal.isBrightEnoughToSpawn`.
+    ///
+    /// Delegates to [`spawn_placements::is_bright_enough_to_spawn`], which is the body vanilla's
+    /// `SpawnPlacements` table reaches. The trait keeps the name because Steel's animal classes call
+    /// it through `Self::`.
     fn is_bright_enough_to_spawn(level: &dyn LevelReader, pos: BlockPos) -> bool
     where
         Self: Sized,
     {
-        level.raw_brightness(pos, 0) > 8
+        spawn_placements::is_bright_enough_to_spawn(level, pos)
     }
 
     /// Returns vanilla `Animal.checkAnimalSpawnRules`.
+    ///
+    /// Delegates to [`spawn_placements::check_animal_spawn_rules`] so the trait and the placement
+    /// table cannot drift apart. That free function calls the free brightness test rather than
+    /// `Self::is_bright_enough_to_spawn`, which is what vanilla does too: both are `static` methods
+    /// in Java, so neither dispatches on the subclass.
     fn check_animal_spawn_rules(
         level: &dyn LevelReader,
         spawn_reason: EntitySpawnReason,
@@ -204,13 +213,7 @@ pub trait Animal: AgeableMob {
     where
         Self: Sized,
     {
-        let bright_enough = spawn_reason.ignores_light_requirements()
-            || Self::is_bright_enough_to_spawn(level, pos);
-        level
-            .get_block_state(pos.below())
-            .get_block()
-            .has_tag(&BlockTag::ANIMALS_SPAWNABLE_ON)
-            && bright_enough
+        spawn_placements::check_animal_spawn_rules(level, spawn_reason, pos)
     }
 
     /// Plays this animal's vanilla eating sound.

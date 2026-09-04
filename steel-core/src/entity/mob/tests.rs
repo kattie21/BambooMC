@@ -9,6 +9,7 @@ use steel_registry::{
     REGISTRY, init_vanilla_registry, vanilla_attributes, vanilla_blocks, vanilla_damage_types,
 };
 use steel_utils::locks::SyncMutex;
+use steel_utils::types::UpdateFlags;
 use steel_utils::{BlockPos, BlockStateId};
 
 use super::{
@@ -20,13 +21,15 @@ use crate::entity::ai::goal::GoalControl;
 use crate::entity::ai::node::Node;
 use crate::entity::ai::path::{Path, PathType};
 use crate::entity::damage::DamageSource;
+use crate::entity::entities::{EndCrystalEntity, PigEntity};
 use crate::entity::leash::Leashable;
 use crate::entity::mob::{Mob, MobBase};
 use crate::entity::{
-    Entity, EntityBase, LivingEntity, LivingEntityBase, PathfinderMob, SharedEntity,
+    Entity, EntityBase, EntitySpawnReason, LivingEntity, LivingEntityBase, PathfinderMob,
+    SharedEntity,
 };
-use crate::test_support::test_world;
-use crate::world::{LevelReader, World};
+use crate::test_support::{fresh_test_world, insert_ready_full_chunk, test_world};
+use crate::world::{LevelAccessor, LevelReader, World};
 
 #[test]
 fn equipment_drop_attempt_gate_matches_vanilla_conditions() {
@@ -748,4 +751,112 @@ fn ground_path_target_solid_rewrites_to_first_open_block_above() {
         find_ground_path_target_surface(&level, BlockPos::new(4, 64, 4)),
         BlockPos::new(4, 66, 4)
     );
+}
+
+/// Builds a world with one loaded chunk and a pig standing in clear air at its center.
+///
+/// The pig is deliberately *not* added to the world: vanilla runs `checkSpawnObstruction`
+/// after positioning a candidate but before `addFreshEntity`, so the mob under test is
+/// absent from the entity manager at the moment the check runs.
+fn obstruction_test_pig(name: &'static str) -> (Arc<World>, PigEntity) {
+    use steel_utils::ChunkPos;
+
+    init_vanilla_registry();
+    init_behaviors();
+    let world = fresh_test_world(name);
+    insert_ready_full_chunk(&world, ChunkPos::new(0, 0));
+    let pig = PigEntity::new(
+        &vanilla_entities::PIG,
+        1,
+        DVec3::new(8.0, 65.0, 8.0),
+        Arc::downgrade(&world),
+    );
+    (world, pig)
+}
+
+#[test]
+fn check_spawn_obstruction_accepts_clear_air() {
+    let (world, pig) = obstruction_test_pig("spawn_obstruction_clear");
+
+    assert!(
+        pig.check_spawn_obstruction(&world),
+        "an empty box with nothing in it should not obstruct a spawn"
+    );
+}
+
+#[test]
+fn check_spawn_obstruction_rejects_a_box_containing_fluid() {
+    let (world, pig) = obstruction_test_pig("spawn_obstruction_fluid");
+
+    world.set_block_state(
+        BlockPos::new(8, 65, 8),
+        vanilla_blocks::WATER.default_state(),
+        UpdateFlags::UPDATE_CLIENTS,
+    );
+
+    assert!(
+        !pig.check_spawn_obstruction(&world),
+        "vanilla's containsAnyLiquid half of the check should veto a waterlogged box"
+    );
+}
+
+#[test]
+fn check_spawn_obstruction_rejects_an_overlapping_building_blocker() {
+    let (world, pig) = obstruction_test_pig("spawn_obstruction_blocker");
+
+    let crystal: SharedEntity = Arc::new(EndCrystalEntity::new(
+        &vanilla_entities::END_CRYSTAL,
+        2,
+        DVec3::new(8.0, 65.0, 8.0),
+        Arc::downgrade(&world),
+    ));
+    world
+        .try_add_entity(Arc::clone(&crystal))
+        .expect("end crystal should attach to the loaded test chunk");
+
+    assert!(
+        !pig.check_spawn_obstruction(&world),
+        "an end crystal sets blocksBuilding, so it should veto the spawn"
+    );
+}
+
+#[test]
+fn check_spawn_obstruction_ignores_entities_that_do_not_block_building() {
+    let (world, pig) = obstruction_test_pig("spawn_obstruction_crowd");
+
+    let neighbour: SharedEntity = Arc::new(PigEntity::new(
+        &vanilla_entities::PIG,
+        2,
+        DVec3::new(8.0, 65.0, 8.0),
+        Arc::downgrade(&world),
+    ));
+    world
+        .try_add_entity(Arc::clone(&neighbour))
+        .expect("second pig should attach to the loaded test chunk");
+
+    assert!(
+        pig.check_spawn_obstruction(&world),
+        "mobs leave blocksBuilding false, so a pack may overlap while it is being placed"
+    );
+}
+
+#[test]
+fn spawn_rule_hook_defaults_match_vanilla() {
+    let (world, pig) = obstruction_test_pig("spawn_rule_defaults");
+
+    assert!(
+        pig.check_spawn_rules(&world, EntitySpawnReason::Natural),
+        "Mob.checkSpawnRules defaults to true so an un-overridden type still spawns"
+    );
+    assert_eq!(
+        pig.get_max_spawn_cluster_size(),
+        4,
+        "Mob.getMaxSpawnClusterSize is 4 in vanilla"
+    );
+    for group_size in [0, 1, 4, 64] {
+        assert!(
+            !pig.is_max_group_size_reached(group_size),
+            "Mob.isMaxGroupSizeReached defaults to false at every group size"
+        );
+    }
 }

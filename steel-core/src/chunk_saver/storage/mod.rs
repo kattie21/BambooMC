@@ -715,6 +715,7 @@ impl ChunkStorage {
             structure_references,
             pois,
             pos,
+            chunk.inhabited_time(),
         );
 
         Some(PreparedChunkSave {
@@ -771,6 +772,7 @@ impl ChunkStorage {
         structure_references: Vec<PersistentStructureReference>,
         pois: Vec<PersistentPoi>,
         chunk_pos: ChunkPos,
+        inhabited_time: i64,
     ) -> PersistentChunk<'static> {
         let mut builder = ChunkBuilder::new(&REGISTRY);
 
@@ -833,6 +835,7 @@ impl ChunkStorage {
             structure_starts,
             structure_references,
             pois,
+            inhabited_time,
         }
     }
 }

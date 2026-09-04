@@ -7,12 +7,13 @@ use std::{
 use steel_registry::entity_type::EntityTypeRef;
 use steel_registry::{
     init_vanilla_registry, sound_events, vanilla_entities, vanilla_fluids, vanilla_game_rules,
-    vanilla_items,
+    vanilla_items, vanilla_world_clocks,
 };
 use uuid::Uuid;
 
 use crate::behavior::init_behaviors;
 use crate::chunk::chunk_ticket_manager::{ChunkTicket, ChunkTicketLevel};
+use crate::chunk::status::ChunkStatus;
 use crate::entity::{EntityBase, entities::PigEntity};
 use crate::test_support::{fresh_test_world, insert_ready_full_chunk, test_world};
 
@@ -562,4 +563,97 @@ fn fluid_clip_height_treats_source_and_flowing_variants_as_same_fluid_above() {
     );
 
     assert_eq!(height.to_bits(), 1.0_f64.to_bits());
+}
+
+#[test]
+fn a_fresh_world_reads_the_full_moon_the_attribute_defaults_to() {
+    init_vanilla_registry();
+    init_behaviors();
+    let world = fresh_test_world("moon_brightness_fresh");
+
+    // Vanilla's EnvironmentAttributes.MOON_PHASE defaults to FULL_MOON, and tick 0 of the moon
+    // timeline is also full_moon, so the two agree before any time has passed.
+    assert_eq!(world.moon_brightness().to_bits(), 1.0_f32.to_bits());
+}
+
+#[test]
+fn the_moon_walks_vanillas_eight_phase_brightness_table() {
+    init_vanilla_registry();
+    init_behaviors();
+    let world = fresh_test_world("moon_brightness_phases");
+
+    // MoonPhase.startTick is index * 24000, and MOON_BRIGHTNESS_PER_PHASE is symmetric about the
+    // new moon at index 4. Sampling one tick into each phase proves the floor division, not just
+    // the boundaries.
+    let expected = [1.0_f32, 0.75, 0.5, 0.25, 0.0, 0.25, 0.5, 0.75];
+    for (index, brightness) in expected.iter().enumerate() {
+        let ticks = i64::try_from(index).expect("phase index fits an i64") * 24_000 + 1;
+        assert!(
+            world
+                .set_clock_total_ticks(&vanilla_world_clocks::OVERWORLD, ticks)
+                .is_some(),
+            "the overworld clock should accept a total-tick write"
+        );
+        assert_eq!(
+            world.moon_brightness().to_bits(),
+            brightness.to_bits(),
+            "phase {index} should read {brightness}"
+        );
+    }
+
+    // The timeline's period is 8 * 24000, so one full cycle later the moon is full again.
+    assert!(
+        world
+            .set_clock_total_ticks(&vanilla_world_clocks::OVERWORLD, 192_000)
+            .is_some()
+    );
+    assert_eq!(world.moon_brightness().to_bits(), 1.0_f32.to_bits());
+}
+
+#[test]
+fn regional_difficulty_reads_the_chunks_own_inhabited_time() {
+    init_vanilla_registry();
+    init_behaviors();
+    let world = fresh_test_world("regional_difficulty");
+    let pos = BlockPos::new(8, 64, 8);
+    insert_ready_full_chunk(&world, ChunkPos::from_block_pos(pos));
+
+    let base = world.current_difficulty_at(pos);
+    assert_eq!(base.difficulty(), world.difficulty());
+
+    // Charging the chunk's inhabited time raises the local term and nothing else, which is the
+    // whole reason vanilla threads inhabitedTime into DifficultyInstance.
+    let Some(holder) = world
+        .chunk_map
+        .active_full_chunk_holder(ChunkPos::from_block_pos(pos))
+    else {
+        panic!("the inserted chunk should have a holder");
+    };
+    let Some(chunk) = holder.try_chunk(ChunkStatus::Full) else {
+        panic!("the inserted chunk should be Full");
+    };
+    chunk.increment_inhabited_time(3_600_000);
+
+    let inhabited = world.current_difficulty_at(pos);
+    assert!(
+        inhabited.effective_difficulty() > base.effective_difficulty(),
+        "a long-inhabited chunk should be harder than a fresh one"
+    );
+}
+
+#[test]
+fn an_unloaded_position_reads_as_never_inhabited_rather_than_loading_a_chunk() {
+    init_vanilla_registry();
+    init_behaviors();
+    let world = fresh_test_world("regional_difficulty_unloaded");
+
+    // Vanilla queries the chunk with load = false and falls back to a local time of zero, so a
+    // position nowhere near a loaded chunk is answerable without generating anything.
+    let far = BlockPos::new(1_000_000, 64, 1_000_000);
+    let instance = world.current_difficulty_at(far);
+
+    assert_eq!(instance.difficulty(), world.difficulty());
+    // Difficulty::Normal at tick 0 with no local time and no moon is 2 * 0.75.
+    assert!((instance.effective_difficulty() - 1.5).abs() < 1e-4);
+    assert_eq!(instance.special_multiplier(), 0.0);
 }

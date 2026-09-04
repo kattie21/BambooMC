@@ -43,7 +43,7 @@ use crate::entity::attribute::{AttributeModifier, AttributeModifierOperation};
 use crate::entity::damage::DamageSource;
 use crate::entity::{
     Entity, EntitySpawnReason, LivingEntity, LivingTravelInput, RemovalReason, SharedEntity,
-    SpawnGroupData, WeakEntity,
+    SpawnGroupData, WeakEntity, aabb_contains_any_liquid,
 };
 use crate::inventory::equipment::EquipmentSlot;
 use crate::player::Player;
@@ -480,6 +480,59 @@ pub trait Mob: LivingEntity + Leashable {
         }
         self.set_left_handed(left_handed);
         group_data
+    }
+
+    /// Returns vanilla `Mob.checkSpawnRules`.
+    ///
+    /// Natural spawning calls this on a fully constructed mob that has not yet been added to
+    /// the world, after the placement type already accepted the position. The base answer is
+    /// an unconditional `true`; the per-type rules — light level, block below, biome, moon
+    /// phase, difficulty — live in the overrides, so a mob that forgets to override this
+    /// spawns anywhere its placement type allows rather than nowhere at all.
+    fn check_spawn_rules(&self, _world: &Arc<World>, _spawn_reason: EntitySpawnReason) -> bool {
+        true
+    }
+
+    /// Returns vanilla `Mob.checkSpawnObstruction`.
+    ///
+    /// The last gate before a natural spawn is committed, run once the mob has been positioned:
+    /// its own bounding box must hold no fluid and no entity that blocks building. Vanilla
+    /// spells the second half `level.isUnobstructed(this)`, whose `EntityGetter` implementation
+    /// queries `getEntities(this, box)` — which already drops this entity and spectators — then
+    /// keeps only entities that are un-removed, block building, and do not share a root vehicle
+    /// with the spawning mob.
+    fn check_spawn_obstruction(&self, world: &Arc<World>) -> bool {
+        let bounding_box = self.bounding_box();
+        if aabb_contains_any_liquid(world, bounding_box) {
+            return false;
+        }
+
+        let this = self.as_entity_event_source();
+        !world.has_entity_in_aabb_matching(&bounding_box, |other| {
+            other.id() != this.id()
+                && !other.is_spectator()
+                && !other.is_removed()
+                && other.blocks_building()
+                && !other.is_passenger_of_same_vehicle(this)
+        })
+    }
+
+    /// Returns vanilla `Mob.getMaxSpawnClusterSize`.
+    ///
+    /// The upper bound on how many mobs one `spawnCategoryForChunk` pack may place: the pack
+    /// size is rolled between the spawner entry's `minCount` and `maxCount`, then clamped to
+    /// this. Types that travel in larger groups — fish schools, wolf packs — raise it.
+    fn get_max_spawn_cluster_size(&self) -> i32 {
+        4
+    }
+
+    /// Returns vanilla `Mob.isMaxGroupSizeReached`.
+    ///
+    /// Checked once per candidate inside a pack, with the count already placed. Answering
+    /// `true` ends the pack early without failing the spawn, which is how types with a hard
+    /// group ceiling stop short of their rolled pack size.
+    fn is_max_group_size_reached(&self, _group_size: i32) -> bool {
+        false
     }
 
     /// Handles vanilla `Mob.interact`.

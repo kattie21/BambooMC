@@ -71,7 +71,7 @@ pub struct BiomeJson {
 
     effects: BiomeEffects,
 
-    #[serde(default)]
+    #[serde(default = "default_creature_spawn_probability")]
     creature_spawn_probability: f32,
     #[serde(default)]
     spawners: FxHashMap<String, Vec<SpawnerData>>,
@@ -129,6 +129,17 @@ struct BiomeEffectsJson {
 
 fn default_water_color() -> String {
     "#3f76e4".to_string()
+}
+
+/// Vanilla's codec fallback for an absent `creature_spawn_probability` key.
+///
+/// `MobSpawnSettings` holds this as `DEFAULT_CREATURE_SPAWN_PROBABILITY` and passes it
+/// to `optionalFieldOf`, so a biome that omits the key means 0.1 rather than 0.0. Only
+/// five vanilla biomes declare the key at all, and each declares a *reduced* value, so
+/// deriving the default from the data instead of the codec silently disables
+/// chunk-generation animal spawning in the other 61.
+const fn default_creature_spawn_probability() -> f32 {
+    0.1
 }
 
 impl From<BiomeEffectsJson> for BiomeEffects {

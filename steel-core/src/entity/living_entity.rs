@@ -590,7 +590,17 @@ pub trait LivingEntity: Entity {
     ///
     /// `world` is the `ServerLevel` supplied by the vanilla caller. It may
     /// intentionally differ from the entity's attached world.
+    ///
+    /// Override this to add behavior around the damage, then delegate to
+    /// [`Self::hurt_server_living_entity`] for the vanilla `LivingEntity.hurtServer` body — that
+    /// split is Steel's stand-in for Java's `super.hurtServer(...)`, which a trait default cannot
+    /// otherwise reach.
     fn hurt_server(&self, world: &World, source: &DamageSource, amount: f32) -> bool {
+        self.hurt_server_living_entity(world, source, amount)
+    }
+
+    /// Runs the vanilla `LivingEntity.hurtServer` body itself.
+    fn hurt_server_living_entity(&self, world: &World, source: &DamageSource, amount: f32) -> bool {
         if self.is_invulnerable_to(world, source) {
             return false;
         }

@@ -5,7 +5,7 @@ use std::{
     io, mem,
     sync::{
         Arc, Weak,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -68,6 +68,7 @@ use crate::chunk::{
 use crate::chunk_saver::ChunkStorage;
 use crate::player::connection::NetworkConnection;
 use crate::world::World;
+use crate::world::natural_spawner::tick_natural_spawns;
 use crate::world::tick_scheduler::{BlockTick, FluidTick, ScheduledTickRunBatch};
 use crate::worldgen::{ChunkGeneratorType, WorldGenContext};
 use crate::{entity::Entity, player::Player};
@@ -78,6 +79,7 @@ mod light_updates;
 mod persistence;
 mod player_tracking;
 mod scheduled_ticks;
+pub(crate) mod spawning_chunks;
 
 #[cfg(test)]
 use light_update_state::PendingLightUpdates;
@@ -272,6 +274,12 @@ pub struct ChunkMap {
     /// Parent cancellation token for all generation tasks.
     /// Child tokens are created per-task; cancelling this cancels everything.
     pub cancel_token: CancellationToken,
+    /// Game time at the last `inhabitedTime` accrual, vanilla's `lastInhabitedUpdate`.
+    ///
+    /// Vanilla keeps this on `ServerChunkCache` and advances it every tick, outside the guard
+    /// that suppresses chunk ticking, so a resumed tick loop applies one large delta rather than
+    /// losing the interval.
+    last_inhabited_update: AtomicI64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -395,11 +403,42 @@ impl ChunkMap {
             generation_refill_stopped: AtomicBool::new(false),
             generation_refill_started: AtomicBool::new(false),
             cancel_token: CancellationToken::new(),
+            last_inhabited_update: AtomicI64::new(0),
         }
     }
 
     pub(crate) fn light_work_window_gate(&self) -> Arc<LightWorkWindowGate> {
         Arc::clone(&self.light_work_window_gate)
+    }
+
+    /// Applies vanilla `ServerChunkCache.tickSpawningChunk`'s `incrementInhabitedTime` pass.
+    ///
+    /// Charges every collected spawning chunk with the ticks elapsed since the last pass. Three
+    /// details are vanilla's and load-bearing:
+    ///
+    /// The delta is `gameTime - lastInhabitedUpdate`, not `1`, so a tick loop that skipped work
+    /// still credits the whole interval.
+    ///
+    /// The clock advances even when no chunk is eligible, because vanilla updates
+    /// `lastInhabitedUpdate` in `tick()` before it decides whether to tick chunks at all. Holding
+    /// it back would let one long spawn-free stretch land on the next inhabited chunk as a single
+    /// enormous delta.
+    ///
+    /// It runs before the spawn attempt and ignores the `spawn_mobs` gamerule, because vanilla
+    /// increments in `tickSpawningChunk` ahead of its `spawningCategories.isEmpty()` guard. A
+    /// world with mob spawning switched off still accrues regional difficulty.
+    fn accrue_inhabited_time(&self, game_time: i64, spawning_chunks: &[Arc<ChunkHolder>]) {
+        let previous = self.last_inhabited_update.swap(game_time, Ordering::AcqRel);
+        let time_diff = game_time.saturating_sub(previous);
+        if time_diff <= 0 {
+            return;
+        }
+
+        for holder in spawning_chunks {
+            if let Some(chunk) = holder.try_chunk(ChunkStatus::Full) {
+                chunk.increment_inhabited_time(time_diff);
+            }
+        }
     }
 
     /// Starts the notify-driven generation refill loop for this chunk map.
@@ -939,6 +978,16 @@ impl ChunkMap {
                     }
                 }
                 timings.tick_chunks = start.elapsed();
+            }
+        }
+
+        {
+            let _span = tracing::trace_span!("natural_spawning").entered();
+            let players = self.spawning_players();
+            let spawning_chunks = self.collect_spawning_chunks(&players);
+            self.accrue_inhabited_time(world.game_time(), &spawning_chunks);
+            if !spawning_chunks.is_empty() {
+                tick_natural_spawns(world, spawning_chunks);
             }
         }
 

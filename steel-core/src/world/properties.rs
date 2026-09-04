@@ -1,8 +1,24 @@
+use steel_registry::{vanilla_timelines, vanilla_world_clocks};
+use steel_utils::types::DifficultyInstance;
+
 use super::{
     ADVANCE_TIME, BlockPos, CChangeDifficulty, ChunkPos, Difficulty, Digest, ErasedGameRuleRef,
     GameRule, GameRuleValue, GameRuleValueType, LevelDataManager, OffsetVoxelShape, Ordering,
     Player, REGISTRY, SectionPos, Sha256, World,
 };
+use crate::chunk::status::ChunkStatus;
+
+/// Vanilla `MoonPhase.PHASE_LENGTH`: ticks each of the eight phases lasts.
+const MOON_PHASE_LENGTH: i64 = 24000;
+
+/// Vanilla `DimensionType.MOON_BRIGHTNESS_PER_PHASE`, indexed by `MoonPhase.index()`.
+///
+/// Full at index 0, dark at index 4, symmetric either side. This is a constant in vanilla's own
+/// source rather than datapack data, so it is ported rather than generated.
+const MOON_BRIGHTNESS_PER_PHASE: [f32; 8] = [1.0, 0.75, 0.5, 0.25, 0.0, 0.25, 0.5, 0.75];
+
+/// Brightness of `MoonPhase.FULL_MOON`, the vanilla default for the moon-phase attribute.
+const MOON_BRIGHTNESS_FULL: f32 = MOON_BRIGHTNESS_PER_PHASE[0];
 
 impl World {
     /// Returns vanilla level difficulty.
@@ -18,6 +34,60 @@ impl World {
             level_data.data().difficulty_locked
         };
         self.broadcast_to_all(CChangeDifficulty { difficulty, locked });
+    }
+
+    /// Returns vanilla `ServerLevel.getMoonBrightness`.
+    ///
+    /// Vanilla reads the `visual/moon_phase` environment attribute, whose source is the `moon`
+    /// timeline's own track, then indexes `DimensionType.MOON_BRIGHTNESS_PER_PHASE`. Steel has no
+    /// environment-attribute layer yet, so this reads the timeline directly — the same source,
+    /// minus the datapack override path that nothing in Steel can populate. The attribute's
+    /// vanilla default is `FULL_MOON`, which is also what tick 0 of the timeline resolves to, so
+    /// the two agree on a fresh world.
+    ///
+    /// The phase index is `current_ticks / PHASE_LENGTH` because vanilla's `MoonPhase.startTick`
+    /// is `index * 24000` and the timeline's keyframes sit on exactly those ticks. Every dimension
+    /// reads the same value, because the `moon` timeline is bound to the overworld clock.
+    #[must_use]
+    pub fn moon_brightness(&self) -> f32 {
+        let total_ticks = self
+            .clock_total_ticks(&vanilla_world_clocks::OVERWORLD)
+            .unwrap_or(0);
+        let phase = vanilla_timelines::MOON.current_ticks(total_ticks) / MOON_PHASE_LENGTH;
+        let index = usize::try_from(phase).unwrap_or(0);
+        MOON_BRIGHTNESS_PER_PHASE
+            .get(index)
+            .copied()
+            .unwrap_or(MOON_BRIGHTNESS_FULL)
+    }
+
+    /// Returns vanilla `ServerLevel.getCurrentDifficultyAt`.
+    ///
+    /// Three of the four inputs are world state; the fourth is the chunk's own `inhabitedTime`,
+    /// which is why regional difficulty is *regional*. Vanilla queries the chunk with
+    /// `load = false` and falls back to a local time of zero when it is absent, so an unloaded
+    /// position reads as never-inhabited rather than forcing a load — and, in the same branch,
+    /// contributes no moon term either.
+    #[must_use]
+    pub fn current_difficulty_at(&self, pos: BlockPos) -> DifficultyInstance {
+        let chunk_pos = ChunkPos::from_block_pos(pos);
+        let (local_time, moon_brightness) = self
+            .chunk_map
+            .active_full_chunk_holder(chunk_pos)
+            .and_then(|holder| {
+                holder
+                    .try_chunk(ChunkStatus::Full)
+                    .map(|chunk| (chunk.inhabited_time(), self.moon_brightness()))
+            })
+            .unwrap_or((0, 0.0));
+
+        DifficultyInstance::new(
+            self.difficulty(),
+            self.clock_total_ticks(&vanilla_world_clocks::OVERWORLD)
+                .unwrap_or(0),
+            local_time,
+            moon_brightness,
+        )
     }
 
     /// Returns the total height of the world in blocks.

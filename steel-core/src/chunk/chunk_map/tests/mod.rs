@@ -276,4 +276,5 @@ mod light_updates;
 mod persistence_unloads;
 mod player_tracking;
 mod scheduled_ticks;
+mod spawning_chunks;
 mod tickets_generation_readiness;

@@ -10,20 +10,28 @@ use std::{
     time::Instant,
 };
 
+use glam::DVec3;
 use parking_lot::{RwLockReadGuard, RwLockWriteGuard};
 use simdnbt::owned::NbtCompound;
+use steel_registry::dimension_type::DimensionTypeRef;
 use steel_registry::{
-    REGISTRY, block_entity_type::BlockEntityTypeRef, blocks::BlockRef,
-    blocks::block_state_ext::BlockStateExt as _, blocks::properties::Direction,
-    blocks::shapes::SupportType, fluid::FluidRef, vanilla_blocks,
+    REGISTRY,
+    block_entity_type::BlockEntityTypeRef,
+    blocks::BlockRef,
+    blocks::block_state_ext::BlockStateExt as _,
+    blocks::properties::Direction,
+    blocks::shapes::{SupportType, is_shape_full_block},
+    fluid::FluidRef,
+    vanilla_blocks,
 };
 use steel_utils::random::RandomSource;
+use steel_utils::types::Difficulty;
 use steel_utils::{
     BlockPos, BlockStateId, ChunkPos, PackedSectionBlockPos, SectionPos, types::UpdateFlags,
 };
 use steel_worldgen::structure::{StructureReferenceMap, StructureStartMap};
 
-use crate::behavior::{BLOCK_BEHAVIORS, FLUID_BEHAVIORS};
+use crate::behavior::{BLOCK_BEHAVIORS, BlockCollisionContext, FLUID_BEHAVIORS};
 use crate::block_entity::{BLOCK_ENTITIES, SharedBlockEntity};
 use crate::chunk::{
     Chunk,
@@ -32,12 +40,13 @@ use crate::chunk::{
     chunk_pyramid::ChunkStep,
     full_chunk::FullChunkRef,
     heightmap::{Heightmap, HeightmapType},
+    light::{LightLayer, MAX_LIGHT_LEVEL},
     section::{ChunkSection, SectionHolder, SectionWriteGuard, Sections},
     status::ChunkStatus,
 };
 use crate::entity::SharedEntity;
 use crate::world::tick_scheduler::TickPriority;
-use crate::world::{LevelAccessor, LevelReader, ScheduledTickAccess, World};
+use crate::world::{LevelAccessor, LevelReader, ScheduledTickAccess, ServerLevelAccessor, World};
 use crate::worldgen::feature::instrumentation::OreFeatureStats;
 use crate::worldgen::generator::context::WorldGenContext;
 
@@ -1434,6 +1443,14 @@ impl LevelReader for WorldGenRegion<'_> {
             .is_face_sturdy(state, self, pos, direction, support_type)
     }
 
+    fn is_collision_shape_full_block(&self, state: BlockStateId, pos: BlockPos) -> bool {
+        let shape = BLOCK_BEHAVIORS
+            .get_behavior(state.get_block())
+            .get_collision_shape(state, self, pos, BlockCollisionContext::empty());
+
+        is_shape_full_block(shape)
+    }
+
     fn raw_brightness(&self, pos: BlockPos, sky_darkening: u8) -> u8 {
         let sky_light = if self.context.world().dimension_type.has_skylight {
             15_u8.saturating_sub(sky_darkening)
@@ -1496,6 +1513,57 @@ impl LevelAccessor for WorldGenRegion<'_> {
             vanilla_blocks::AIR.default_state(),
             UpdateFlags::UPDATE_ALL,
         )
+    }
+}
+
+impl ServerLevelAccessor for WorldGenRegion<'_> {
+    fn difficulty(&self) -> Difficulty {
+        self.context.world().difficulty()
+    }
+
+    /// Returns the region's light model rather than the level light engine.
+    ///
+    /// Vanilla's `WorldGenRegion` forwards `getLightEngine` to the real level, but block light is
+    /// not generated for feature-stage proto chunks, so [`WorldGenRegion::block_light_at`] already
+    /// treats the region as unlit and [`LevelReader::raw_brightness`] already treats it as fully
+    /// sky-lit. This keeps the per-layer reader consistent with both instead of introducing a
+    /// third answer.
+    fn brightness(&self, layer: LightLayer, pos: BlockPos) -> u8 {
+        match layer {
+            LightLayer::Sky if self.context.world().dimension_type.has_skylight => MAX_LIGHT_LEVEL,
+            LightLayer::Sky => 0,
+            LightLayer::Block => self.block_light_at(pos),
+        }
+    }
+
+    fn is_thundering(&self) -> bool {
+        self.context.world().is_thundering()
+    }
+
+    /// Returns vanilla `WorldGenRegion.getSkyDarken`, which is a constant zero.
+    fn sky_darkening(&self) -> u8 {
+        0
+    }
+
+    fn dimension_type(&self) -> DimensionTypeRef {
+        self.context.world().dimension_type
+    }
+
+    fn sea_level(&self) -> i32 {
+        WorldGenRegion::sea_level(self)
+    }
+
+    /// Returns the live world's border, which vanilla `WorldGenRegion.getWorldBorder` also does.
+    fn is_block_within_world_border(&self, pos: BlockPos) -> bool {
+        self.context.world().is_block_within_world_border(pos)
+    }
+
+    /// Returns `false`, because vanilla `WorldGenRegion.players` is always the empty list.
+    ///
+    /// Chunk-generation spawning only ever runs the `CREATURE` category, none of whose predicates
+    /// query players, so this is unreachable through the spawn path rather than merely unused.
+    fn has_nearby_non_creative_player(&self, _position: DVec3, _range: f64) -> bool {
+        false
     }
 }
 

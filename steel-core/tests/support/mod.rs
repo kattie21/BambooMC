@@ -2,7 +2,9 @@ use std::cell::{Cell, RefCell};
 use std::slice;
 use std::sync::{Arc, OnceLock};
 
+use glam::DVec3;
 use steel_registry::blocks::{BlockRef, block_state_ext::BlockStateExt};
+use steel_registry::dimension_type::DimensionTypeRef;
 use steel_registry::fluid::FluidRef;
 use steel_registry::game_events::GameEventRef;
 use steel_registry::sound_event::SoundEventRef;
@@ -17,13 +19,15 @@ use toml::map::Map;
 use crate::chunk::Chunk;
 use crate::chunk::chunk_holder::{ChunkHolder, TickingReadiness};
 use crate::chunk::chunk_ticket_manager::ChunkTicketLevel;
+use crate::chunk::light::LightLayer;
 use crate::chunk::section::{ChunkSection, Sections};
 use crate::chunk::status::ChunkStatus;
 use crate::entity::Entity;
 use crate::level_data::WorldGenerationSettings;
 use crate::world::game_event::GameEventContext;
 use crate::world::{
-    LevelAccessor, LevelReader, ScheduledTickAccess, World, WorldConfig, WorldStorageConfig,
+    LevelAccessor, LevelReader, ScheduledTickAccess, ServerLevelAccessor, World, WorldConfig,
+    WorldStorageConfig,
 };
 use crate::worldgen::{ChunkGeneratorType, EmptyChunkGenerator};
 use steel_utils::ChunkPos;
@@ -239,6 +243,10 @@ pub(crate) struct TestLevel {
     blocks: RefCell<Vec<(BlockPos, BlockStateId)>>,
     default_block_state: RefCell<Option<BlockStateId>>,
     raw_brightness: Cell<u8>,
+    sky_brightness: Cell<u8>,
+    block_brightness: Cell<u8>,
+    difficulty: Cell<Difficulty>,
+    within_world_border: Cell<bool>,
     min_y: Cell<i32>,
     height: Cell<i32>,
     fluid_tick_delay: Cell<i32>,
@@ -255,6 +263,10 @@ impl Default for TestLevel {
             blocks: RefCell::new(Vec::new()),
             default_block_state: RefCell::new(None),
             raw_brightness: Cell::new(0),
+            sky_brightness: Cell::new(0),
+            block_brightness: Cell::new(0),
+            difficulty: Cell::new(Difficulty::Normal),
+            within_world_border: Cell::new(true),
             min_y: Cell::new(-64),
             height: Cell::new(384),
             fluid_tick_delay: Cell::new(5),
@@ -280,6 +292,35 @@ impl TestLevel {
 
     pub(crate) fn with_raw_brightness(self, raw_brightness: u8) -> Self {
         self.raw_brightness.set(raw_brightness);
+        self
+    }
+
+    /// Sets the stored light of one layer, which `ServerLevelAccessor::brightness` reads.
+    ///
+    /// This is independent of [`Self::with_raw_brightness`], because the two are separate readings
+    /// in vanilla too: `getBrightness` is one layer's stored value and `getRawBrightness` is the
+    /// maximum across both after sky darkening.
+    pub(crate) fn with_layer_brightness(self, layer: LightLayer, brightness: u8) -> Self {
+        match layer {
+            LightLayer::Sky => self.sky_brightness.set(brightness),
+            LightLayer::Block => self.block_brightness.set(brightness),
+        }
+        self
+    }
+
+    /// Sets the difficulty this level reports.
+    pub(crate) fn with_difficulty(self, difficulty: Difficulty) -> Self {
+        self.difficulty.set(difficulty);
+        self
+    }
+
+    /// Puts every position outside the world border.
+    ///
+    /// The fixture has no border geometry, so containment is one flag rather than a shape. That is
+    /// enough for the callers that only ask the question — vanilla's spawn placements consult the
+    /// border before reading a single block, and a test wanting the refusal wants it everywhere.
+    pub(crate) fn with_blocks_outside_world_border(self) -> Self {
+        self.within_world_border.set(false);
         self
     }
 
@@ -412,5 +453,48 @@ impl LevelAccessor for TestLevel {
             source_entity_id: context.source_entity().map(Entity::id),
             affected_state: context.affected_state(),
         });
+    }
+}
+
+/// Lets spawn predicates run against the fixture rather than a whole [`World`].
+///
+/// Three of these are fixed rather than configurable, because no test needs to vary them and a
+/// setter nothing calls is a dead-code error here: the weather is calm, the sky is not darkened, and
+/// no player is nearby. The dimension is the overworld, so the monster light window is its uniform
+/// 0..=7 and its block-light limit is 0.
+impl ServerLevelAccessor for TestLevel {
+    fn difficulty(&self) -> Difficulty {
+        self.difficulty.get()
+    }
+
+    fn brightness(&self, layer: LightLayer, _pos: BlockPos) -> u8 {
+        match layer {
+            LightLayer::Sky => self.sky_brightness.get(),
+            LightLayer::Block => self.block_brightness.get(),
+        }
+    }
+
+    fn is_thundering(&self) -> bool {
+        false
+    }
+
+    fn sky_darkening(&self) -> u8 {
+        0
+    }
+
+    fn dimension_type(&self) -> DimensionTypeRef {
+        &vanilla_dimension_types::OVERWORLD
+    }
+
+    fn sea_level(&self) -> i32 {
+        63
+    }
+
+    fn is_block_within_world_border(&self, _pos: BlockPos) -> bool {
+        self.within_world_border.get()
+    }
+
+    fn has_nearby_non_creative_player(&self, _position: DVec3, _range: f64) -> bool {
+        false
     }
 }

@@ -36,6 +36,78 @@ impl MobCategory {
     pub const fn no_despawn_distance(self) -> i32 {
         32
     }
+
+    /// Every category in vanilla's declaration order, mirroring `MobCategory.values()`.
+    ///
+    /// Natural spawning iterates this minus [`Self::Misc`], so the order is load-bearing:
+    /// it decides which category gets to fill the global cap first on a busy tick.
+    pub const ALL: [Self; 8] = [
+        Self::Monster,
+        Self::Creature,
+        Self::Ambient,
+        Self::Axolotls,
+        Self::UndergroundWaterCreature,
+        Self::WaterCreature,
+        Self::WaterAmbient,
+        Self::Misc,
+    ];
+
+    /// Vanilla's serialized name.
+    ///
+    /// This is also the key each biome's spawner map is stored under, so it is the string
+    /// that joins [`crate::biome::Biome::spawners`] to a category at spawn time.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Monster => "monster",
+            Self::Creature => "creature",
+            Self::Ambient => "ambient",
+            Self::Axolotls => "axolotls",
+            Self::UndergroundWaterCreature => "underground_water_creature",
+            Self::WaterCreature => "water_creature",
+            Self::WaterAmbient => "water_ambient",
+            Self::Misc => "misc",
+        }
+    }
+
+    /// Per-chunk cap numerator for this category.
+    ///
+    /// Two very different jobs use it. The global cap is
+    /// `max_instances_per_chunk * spawnable_chunk_count / 289`, so this is a density over
+    /// the whole spawn-eligible area rather than a real per-chunk limit; the local cap does
+    /// compare it against one chunk's count. [`Self::Misc`] is deliberately `-1` — it never
+    /// spawns naturally, which is why the spawn loop skips it instead of relying on the cap.
+    #[must_use]
+    pub const fn max_instances_per_chunk(self) -> i32 {
+        match self {
+            Self::Monster => 70,
+            Self::Creature => 10,
+            Self::Ambient => 15,
+            Self::Axolotls | Self::UndergroundWaterCreature | Self::WaterCreature => 5,
+            Self::WaterAmbient => 20,
+            Self::Misc => -1,
+        }
+    }
+
+    /// Whether this category still spawns when hostile spawning is off.
+    ///
+    /// Only [`Self::Monster`] is unfriendly, so this is what the `doMobSpawning`/peaceful
+    /// pair of gates actually tests.
+    #[must_use]
+    pub const fn is_friendly(self) -> bool {
+        !matches!(self, Self::Monster)
+    }
+
+    /// Whether this category is only eligible on the every-400-ticks spawn pass.
+    ///
+    /// Vanilla calls these persistent because their mobs survive without a player nearby;
+    /// the consequence for spawning is the opposite of what the name suggests — they get
+    /// **one** attempt in 400 ticks, which is why animals are sparse after world
+    /// generation while monsters refill every tick.
+    #[must_use]
+    pub const fn is_persistent(self) -> bool {
+        matches!(self, Self::Creature | Self::Misc)
+    }
 }
 
 /// Vanilla attachment point kind used by `EntityDimensions`.
@@ -360,9 +432,11 @@ crate::impl_tagged_registry!(EntityTypeRegistry, types_by_key, "entity type");
 
 #[cfg(test)]
 mod tests {
-    use crate::vanilla_entities;
+    use crate::{vanilla_biomes, vanilla_entities};
 
-    use super::{EntityAttachment, EntityAttachmentPoint, EntityAttachments, EntityDimensions};
+    use super::{
+        EntityAttachment, EntityAttachmentPoint, EntityAttachments, EntityDimensions, MobCategory,
+    };
 
     fn assert_vec3_close(left: glam::DVec3, right: glam::DVec3) {
         let diff = left - right;
@@ -472,5 +546,98 @@ mod tests {
         assert!(vanilla_entities::SPECTRAL_ARROW.is_abstract_arrow);
         assert!(vanilla_entities::TRIDENT.is_abstract_arrow);
         assert!(!vanilla_entities::ENDER_PEARL.is_abstract_arrow);
+    }
+
+    /// `MobCategory::name` is the key that joins a category to a biome's spawner list, so a
+    /// typo here would not fail to compile — it would silently return an empty spawn list
+    /// and read as "this biome has no mobs". Cross-check the enum against the generated data
+    /// rather than against itself.
+    #[test]
+    fn category_names_are_keys_in_every_generated_biome_spawner_map() {
+        for biome in [
+            &vanilla_biomes::PLAINS,
+            &vanilla_biomes::DESERT,
+            &vanilla_biomes::OCEAN,
+            &vanilla_biomes::LUSH_CAVES,
+            &vanilla_biomes::NETHER_WASTES,
+            &vanilla_biomes::THE_END,
+        ] {
+            for category in MobCategory::ALL {
+                assert!(
+                    biome.spawners.contains_key(category.name()),
+                    "{} has no spawner entry keyed {:?}",
+                    biome.key,
+                    category.name()
+                );
+            }
+        }
+    }
+
+    /// `ALL` is iterated to build the spawning-category list, so a duplicated or dropped
+    /// variant would quietly change spawn rates rather than fail.
+    #[test]
+    fn all_categories_are_distinct() {
+        let mut names: Vec<&str> = MobCategory::ALL.iter().map(|c| c.name()).collect();
+        names.sort_unstable();
+        let distinct = names.len();
+        names.dedup();
+        assert_eq!(names.len(), distinct, "MobCategory::ALL repeats a variant");
+        assert_eq!(distinct, 8, "MobCategory::ALL is not the full vanilla set");
+    }
+
+    /// The cap table straight from vanilla's enum constructor. These six numbers set every
+    /// mob density in the game, so they are pinned literally rather than derived.
+    #[test]
+    fn cap_table_matches_vanilla() {
+        assert_eq!(MobCategory::Monster.max_instances_per_chunk(), 70);
+        assert_eq!(MobCategory::Creature.max_instances_per_chunk(), 10);
+        assert_eq!(MobCategory::Ambient.max_instances_per_chunk(), 15);
+        assert_eq!(MobCategory::Axolotls.max_instances_per_chunk(), 5);
+        assert_eq!(
+            MobCategory::UndergroundWaterCreature.max_instances_per_chunk(),
+            5
+        );
+        assert_eq!(MobCategory::WaterCreature.max_instances_per_chunk(), 5);
+        assert_eq!(MobCategory::WaterAmbient.max_instances_per_chunk(), 20);
+    }
+
+    /// `misc` is the one category excluded from natural spawning, and its `-1` cap is the
+    /// marker that says so. Anything else going negative would stop that category spawning
+    /// entirely, so assert the sign, not just the value.
+    #[test]
+    fn misc_is_the_only_category_with_a_negative_cap() {
+        for category in MobCategory::ALL {
+            let cap = category.max_instances_per_chunk();
+            if matches!(category, MobCategory::Misc) {
+                assert_eq!(cap, -1, "misc should carry vanilla's -1 sentinel");
+            } else {
+                assert!(
+                    cap > 0,
+                    "{} should have a positive cap, got {cap}",
+                    category.name()
+                );
+            }
+        }
+    }
+
+    /// The two flags that gate a category out of a tick: `is_friendly` is checked against
+    /// the hostile-spawning rule, `is_persistent` against the 400-tick pass. Getting either
+    /// wrong changes what spawns without changing whether anything spawns.
+    #[test]
+    fn friendly_and_persistent_flags_match_vanilla() {
+        for category in MobCategory::ALL {
+            assert_eq!(
+                category.is_friendly(),
+                !matches!(category, MobCategory::Monster),
+                "{} has the wrong friendly flag",
+                category.name()
+            );
+            assert_eq!(
+                category.is_persistent(),
+                matches!(category, MobCategory::Creature | MobCategory::Misc),
+                "{} has the wrong persistent flag",
+                category.name()
+            );
+        }
     }
 }

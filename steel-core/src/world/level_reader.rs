@@ -4,16 +4,22 @@
 //! `canSurvive` should depend on the world-reading surface, not on the concrete
 //! `World` type. `World` and `WorldGenRegion` both implement this trait.
 
+use glam::DVec3;
 use steel_registry::blocks::BlockRef;
 use steel_registry::blocks::block_state_ext::BlockStateExt as _;
 use steel_registry::blocks::properties::Direction;
-use steel_registry::blocks::shapes::SupportType;
+use steel_registry::blocks::shapes::{SupportType, is_shape_full_block};
+use steel_registry::blocks::spawn_rule::BlockSpawnRule;
+use steel_registry::dimension_type::DimensionTypeRef;
+use steel_registry::entity_type::EntityTypeRef;
 use steel_registry::fluid::FluidRef;
 use steel_registry::game_events::GameEventRef;
 use steel_registry::sound_event::SoundEventRef;
+use steel_utils::types::Difficulty;
 use steel_utils::{BlockPos, BlockStateId, types::UpdateFlags};
 
 use crate::block_entity::SharedBlockEntity;
+use crate::chunk::light::LightLayer;
 use crate::world::game_event::GameEventContext;
 
 const VANILLA_HORIZONTAL_LIMIT: i32 = 30_000_000;
@@ -50,6 +56,42 @@ pub trait LevelReader {
         support_type: SupportType,
     ) -> bool {
         state.is_face_sturdy_for_at(pos, direction, support_type)
+    }
+
+    /// Mirrors vanilla `BlockState.isCollisionShapeFullBlock`.
+    ///
+    /// Lightweight and worldgen views default to the extracted static collision shape, which is
+    /// exactly what vanilla's block-state cache precomputes: it measures the shape against
+    /// `EmptyBlockGetter` at the origin, and refuses to build at all for a block carrying both a
+    /// collision shape and a position offset. Live views override this to dispatch through block
+    /// behavior, which is vanilla's uncached path for a dynamic-shape block.
+    #[expect(
+        unused_variables,
+        reason = "the extracted default answers from the state alone"
+    )]
+    fn is_collision_shape_full_block(&self, state: BlockStateId, pos: BlockPos) -> bool {
+        is_shape_full_block(state.get_static_collision_shape())
+    }
+
+    /// Returns vanilla `BlockState.isValidSpawn`.
+    ///
+    /// This is the per-block half of a natural spawn check: whether *this* block, sitting one
+    /// below the candidate position, will hold the given entity type. Vanilla stores it as a
+    /// predicate on `BlockBehaviour.Properties`, defaulting to a sturdy upward face on a block
+    /// emitting less than light level 14, with 34 registrations in `Blocks` replacing that
+    /// default. [`BlockSpawnRule`] carries those replacements; only the default needs a level and
+    /// a position, which is why it is evaluated here rather than there.
+    fn is_valid_spawn(
+        &self,
+        state: BlockStateId,
+        pos: BlockPos,
+        entity_type: EntityTypeRef,
+    ) -> bool {
+        if let Some(allowed) = BlockSpawnRule::of(state.get_block()).allows(entity_type) {
+            return allowed;
+        }
+
+        self.is_face_sturdy(state, pos, Direction::Up) && state.get_light_emission() < 14
     }
 
     /// Returns vanilla raw brightness at a position after sky darkening.
@@ -181,8 +223,73 @@ pub trait LevelAccessor: ScheduledTickAccess {
     fn game_event(&self, event: GameEventRef, pos: BlockPos, context: &GameEventContext<'_>) {}
 }
 
+/// Level access needed by vanilla spawn predicates.
+///
+/// This is vanilla's `ServerLevelAccessor`, the surface `SpawnPlacements.checkSpawnRules` takes.
+/// Vanilla draws the line in the same place and for the same reason: a spawn predicate reads
+/// world-wide state a plain block-reading view has no business knowing — the difficulty, the
+/// weather, the per-layer light, the dimension's spawn light window, the sea level and the
+/// players. Vanilla reaches most of it through `ServerLevelAccessor.getLevel()`, which returns
+/// the real `ServerLevel` even when the caller is a worldgen region.
+///
+/// Outside tests, only [`crate::world::World`] and [`crate::worldgen::region::WorldGenRegion`]
+/// implement this. Both must, because `NaturalSpawner.spawnMobsForChunkGeneration` calls
+/// `checkSpawnRules` with a region rather than a level. Keeping these methods off [`LevelReader`]
+/// is deliberate: that trait has a dozen minimal test and AI fixtures as impls, and defaulted
+/// world-state readers would hand every one of them a plausible wrong answer.
+pub trait ServerLevelAccessor: LevelAccessor {
+    /// Returns vanilla `LevelAccessor.getDifficulty`.
+    fn difficulty(&self) -> Difficulty;
+
+    /// Returns vanilla `BlockAndTintGetter.getBrightness` for one light layer.
+    ///
+    /// This is the raw stored light of that single layer, unlike
+    /// [`LevelReader::raw_brightness`], which is vanilla `getRawBrightness` and takes the maximum
+    /// across both layers after sky darkening.
+    fn brightness(&self, layer: LightLayer, pos: BlockPos) -> u8;
+
+    /// Returns vanilla `Level.isThundering`.
+    fn is_thundering(&self) -> bool;
+
+    /// Returns vanilla `Level.getSkyDarken`.
+    fn sky_darkening(&self) -> u8;
+
+    /// Returns vanilla `LevelReader.dimensionType`.
+    fn dimension_type(&self) -> DimensionTypeRef;
+
+    /// Returns vanilla `LevelReader.getSeaLevel`.
+    fn sea_level(&self) -> i32;
+
+    /// Returns vanilla `WorldBorder.isWithinBounds(BlockPos)` for this level's border.
+    ///
+    /// Vanilla reaches the border through `LevelReader.getWorldBorder()`, which every reading view
+    /// answers. Steel keeps it here for the same reason the rest of this trait is here: the border
+    /// is world-wide state, and a defaulted reader on [`LevelReader`] would hand each of that
+    /// trait's minimal fixtures a plausible wrong answer. Three of vanilla's four placement types
+    /// gate on it, so a fixture answering `true` by accident would let a spawn through that the
+    /// live world refuses.
+    fn is_block_within_world_border(&self, pos: BlockPos) -> bool;
+
+    /// Returns whether vanilla `EntityGetter.getNearestPlayer(x, y, z, range, true)` finds anyone.
+    ///
+    /// That `true` selects `EntitySelector.NO_CREATIVE_OR_SPECTATOR`, so creative-mode and
+    /// spectating players are invisible to the query. Spawn predicates only ever compare the
+    /// result against `null`, so this reports presence rather than returning the player.
+    fn has_nearby_non_creative_player(&self, position: DVec3, range: f64) -> bool;
+
+    /// Returns vanilla `LevelReader.getMaxLocalRawBrightness(pos)`, the one-argument form.
+    ///
+    /// Vanilla's overload passes the level's current sky darkening, which a plain reading view
+    /// cannot supply, so the two-argument form lives on [`LevelReader`] and this one here.
+    fn max_local_raw_brightness_now(&self, pos: BlockPos) -> u8 {
+        self.max_local_raw_brightness(pos, self.sky_darkening())
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use steel_registry::{init_vanilla_registry, vanilla_blocks, vanilla_entities};
+
     use super::*;
 
     struct TestLevel {
@@ -278,5 +385,94 @@ mod tests {
             }
             .can_see_sky(BlockPos::ZERO)
         );
+    }
+
+    /// A level with no light of its own, so `is_valid_spawn` reads only the block it is handed.
+    fn unlit_level() -> TestLevel {
+        init_vanilla_registry();
+        TestLevel {
+            raw_brightness: 0,
+            ambient_light: 0.0,
+        }
+    }
+
+    /// A plain full block that emits nothing satisfies vanilla's default predicate.
+    #[test]
+    fn default_spawn_predicate_accepts_a_sturdy_unlit_block() {
+        let level = unlit_level();
+
+        assert!(level.is_valid_spawn(
+            vanilla_blocks::STONE.default_state(),
+            BlockPos::ZERO,
+            &vanilla_entities::ZOMBIE,
+        ));
+    }
+
+    /// Light emission of 14 or more fails the default predicate on an otherwise sturdy block.
+    #[test]
+    fn default_spawn_predicate_rejects_a_bright_block() {
+        let level = unlit_level();
+        let glowstone = vanilla_blocks::GLOWSTONE.default_state();
+
+        assert!(
+            level.is_face_sturdy(glowstone, BlockPos::ZERO, Direction::Up),
+            "glowstone must hold the sturdy half of the default predicate, or this test proves nothing"
+        );
+        assert!(glowstone.get_light_emission() >= 14);
+        assert!(!level.is_valid_spawn(glowstone, BlockPos::ZERO, &vanilla_entities::ZOMBIE));
+    }
+
+    /// A tabled rule beats the default: bedrock passes the default and still refuses every spawn.
+    #[test]
+    fn tabled_rules_override_the_default_predicate() {
+        let level = unlit_level();
+        let bedrock = vanilla_blocks::BEDROCK.default_state();
+
+        assert!(
+            level.is_face_sturdy(bedrock, BlockPos::ZERO, Direction::Up)
+                && bedrock.get_light_emission() < 14,
+            "bedrock must satisfy the default predicate, or this test proves nothing"
+        );
+        assert!(!level.is_valid_spawn(bedrock, BlockPos::ZERO, &vanilla_entities::ZOMBIE));
+    }
+
+    /// The entity-typed rules read the spawning type rather than the block alone.
+    ///
+    /// Leaves and ice bracket the two directions a rule can move the answer. Vanilla
+    /// `LeavesBlock.getBlockSupportShape` returns an empty shape, so the default predicate refuses
+    /// *every* mob on leaves and `ocelotOrParrot` is what lets two of them through; ice and the
+    /// magma block both satisfy the default, so their rules exist only to turn it down.
+    #[test]
+    fn entity_typed_rules_select_on_the_spawning_type() {
+        let level = unlit_level();
+        let pos = BlockPos::ZERO;
+
+        let leaves = vanilla_blocks::OAK_LEAVES.default_state();
+        assert!(
+            !level.is_face_sturdy(leaves, pos, Direction::Up),
+            "leaves must fail the default predicate, or this test proves nothing"
+        );
+        assert!(level.is_valid_spawn(leaves, pos, &vanilla_entities::OCELOT));
+        assert!(level.is_valid_spawn(leaves, pos, &vanilla_entities::PARROT));
+        assert!(!level.is_valid_spawn(leaves, pos, &vanilla_entities::ZOMBIE));
+
+        for state in [
+            vanilla_blocks::ICE.default_state(),
+            vanilla_blocks::MAGMA_BLOCK.default_state(),
+        ] {
+            assert!(
+                level.is_face_sturdy(state, pos, Direction::Up) && state.get_light_emission() < 14,
+                "{} must satisfy the default predicate, or this test proves nothing",
+                state.get_block().key
+            );
+        }
+
+        let ice = vanilla_blocks::ICE.default_state();
+        assert!(level.is_valid_spawn(ice, pos, &vanilla_entities::POLAR_BEAR));
+        assert!(!level.is_valid_spawn(ice, pos, &vanilla_entities::COW));
+
+        let magma = vanilla_blocks::MAGMA_BLOCK.default_state();
+        assert!(level.is_valid_spawn(magma, pos, &vanilla_entities::BLAZE));
+        assert!(!level.is_valid_spawn(magma, pos, &vanilla_entities::COW));
     }
 }

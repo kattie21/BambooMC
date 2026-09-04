@@ -2,6 +2,7 @@ use rustc_hash::FxHashMap;
 use simdnbt::ToNbtTag;
 use simdnbt::owned::NbtTag;
 use steel_utils::Identifier;
+use steel_utils::random::Random;
 
 use crate::sound_event::SoundEventRef;
 use crate::world_clock::WorldClockRef;
@@ -128,6 +129,33 @@ pub enum MonsterSpawnLightLevel {
         min_inclusive: i32,
         max_inclusive: i32,
     },
+}
+
+impl MonsterSpawnLightLevel {
+    /// Returns vanilla `DimensionType.monsterSpawnLightTest().sample(random)`.
+    ///
+    /// Vanilla holds this as an `IntProvider`, so a datapack may name any provider type. Every
+    /// builtin dimension names `minecraft:uniform`, whose sample is
+    /// `Mth.randomBetweenInclusive(random, minInclusive, maxInclusive)`. The assertion is not
+    /// decoration: `minecraft:biased_to_bottom` carries the same two field names and would
+    /// deserialize into this same variant while sampling a different distribution.
+    #[must_use]
+    pub fn sample(&self, random: &mut impl Random) -> i32 {
+        match *self {
+            Self::Simple(value) => value,
+            Self::Complex {
+                distribution_type,
+                min_inclusive,
+                max_inclusive,
+            } => {
+                debug_assert_eq!(
+                    distribution_type, "minecraft:uniform",
+                    "monster spawn light level provider {distribution_type} is not sampled as uniform"
+                );
+                random.next_i32_between(min_inclusive, max_inclusive)
+            }
+        }
+    }
 }
 
 impl ToNbtTag for &DimensionType {
@@ -362,6 +390,8 @@ crate::impl_registry!(
 
 #[cfg(test)]
 mod tests {
+    use steel_utils::random::xoroshiro::Xoroshiro;
+
     use crate::dimension_type::DimensionType;
     use crate::vanilla_dimension_types::{OVERWORLD, THE_END, THE_NETHER};
 
@@ -378,6 +408,39 @@ mod tests {
         assert_eq!(
             DimensionType::get_teleportation_scale(&THE_END, &THE_NETHER),
             0.125
+        );
+    }
+
+    /// A constant light test ignores the random source, as vanilla's `ConstantInt` does.
+    #[test]
+    fn simple_monster_spawn_light_level_samples_its_own_value() {
+        let mut random = Xoroshiro::from_seed_unmixed(42);
+
+        assert_eq!(THE_NETHER.monster_spawn_light_level.sample(&mut random), 7);
+        assert_eq!(THE_END.monster_spawn_light_level.sample(&mut random), 15);
+    }
+
+    /// The overworld's uniform 0..=7 test must cover its whole inclusive range and nothing else.
+    ///
+    /// Vanilla `UniformInt.sample` is `Mth.randomBetweenInclusive`, so 7 has to be reachable; an
+    /// exclusive bound would be silently darker than vanilla rather than obviously wrong.
+    #[test]
+    fn uniform_monster_spawn_light_level_covers_its_inclusive_range() {
+        let mut random = Xoroshiro::from_seed_unmixed(1);
+        let mut seen = [false; 8];
+
+        for _ in 0..1_000 {
+            let sample = OVERWORLD.monster_spawn_light_level.sample(&mut random);
+            assert!(
+                (0..=7).contains(&sample),
+                "sample {sample} is outside the overworld's uniform 0..=7 light test"
+            );
+            seen[usize::try_from(sample).expect("sample is in 0..=7")] = true;
+        }
+
+        assert!(
+            seen.iter().all(|hit| *hit),
+            "unreached light level: {seen:?}"
         );
     }
 }

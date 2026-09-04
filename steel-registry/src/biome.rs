@@ -331,3 +331,56 @@ impl crate::RegistryEntry for Biome {
         self.id.get().copied()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::vanilla_biomes;
+
+    /// Tolerance for comparing a generated `f32` against the value it was generated from.
+    const TOLERANCE: f32 = 1e-6;
+
+    /// Biomes that omit `creature_spawn_probability` must inherit vanilla's codec
+    /// fallback of 0.1, not the numeric zero a bare `serde` default would produce.
+    ///
+    /// Zero is silently fatal rather than loudly wrong: chunk-generation spawning draws
+    /// its mob count from a loop conditioned on this value, so a zero means a freshly
+    /// generated chunk gets no animals while every other system still reports healthy.
+    #[test]
+    fn absent_creature_spawn_probability_defaults_to_vanilla_codec_value() {
+        for biome in [
+            &vanilla_biomes::PLAINS,
+            &vanilla_biomes::FOREST,
+            &vanilla_biomes::SAVANNA,
+            &vanilla_biomes::TAIGA,
+            &vanilla_biomes::JUNGLE,
+            &vanilla_biomes::SWAMP,
+        ] {
+            assert!(
+                (biome.creature_spawn_probability - 0.1).abs() < TOLERANCE,
+                "{} should default to 0.1, got {}",
+                biome.key,
+                biome.creature_spawn_probability
+            );
+        }
+    }
+
+    /// The five biomes that do declare the key keep their own reduced values, which is
+    /// what proves the default above is a default and not a blanket overwrite.
+    #[test]
+    fn declared_creature_spawn_probability_is_preserved() {
+        for (biome, expected) in [
+            (&vanilla_biomes::BADLANDS, 0.03),
+            (&vanilla_biomes::ERODED_BADLANDS, 0.03),
+            (&vanilla_biomes::WOODED_BADLANDS, 0.04),
+            (&vanilla_biomes::ICE_SPIKES, 0.07),
+            (&vanilla_biomes::SNOWY_PLAINS, 0.07),
+        ] {
+            assert!(
+                (biome.creature_spawn_probability - expected).abs() < TOLERANCE,
+                "{} should keep its declared {expected}, got {}",
+                biome.key,
+                biome.creature_spawn_probability
+            );
+        }
+    }
+}

@@ -436,6 +436,7 @@ impl ChunkStorage {
                 structure_references,
                 light,
             );
+            chunk.set_inhabited_time(persistent.inhabited_time);
             let full = FullChunkRef::from_full_context(&chunk);
 
             // Load block entities
@@ -515,6 +516,7 @@ impl ChunkStorage {
                 level.clone(),
                 light,
             );
+            chunk.set_inhabited_time(persistent.inhabited_time);
 
             for persistent_be in &persistent.block_entities {
                 let block_entity_pos = Self::persistent_block_entity_pos(persistent_be, pos);

@@ -116,9 +116,12 @@ mod events;
 pub mod game_event;
 mod level_effects;
 mod level_reader;
+mod local_mob_cap_calculator;
+pub(crate) mod natural_spawner;
 mod player_index;
 pub(crate) mod player_spawn_finder;
 mod portals;
+mod potential_calculator;
 mod properties;
 mod raycast;
 mod redstone;
@@ -126,6 +129,7 @@ mod signal_getter;
 mod sleep;
 mod sleep_status;
 mod spawn;
+mod structure_manager;
 pub mod tick_scheduler;
 mod weather;
 mod world_entities;
@@ -144,7 +148,7 @@ use border::{WorldBorder, WorldBorderSnapshot};
 use entity_management::NavigatingMobTracker;
 #[cfg(test)]
 use entity_management::nearest_player_distance_in_range;
-pub use level_reader::{LevelAccessor, LevelReader, ScheduledTickAccess};
+pub use level_reader::{LevelAccessor, LevelReader, ScheduledTickAccess, ServerLevelAccessor};
 pub use player_index::{PlayerAreaMap, PlayerMap};
 pub use raycast::{ClipBlockShape, ClipFluid, ClipHitResult, RaytraceAction};
 pub use signal_getter::{SignalGetter, SignalQueryContext};
@@ -663,6 +667,10 @@ impl LevelReader for World {
             .is_face_sturdy(state, self, pos, direction, support_type)
     }
 
+    fn is_collision_shape_full_block(&self, state: BlockStateId, pos: BlockPos) -> bool {
+        self.is_collision_shape_full_block_at(pos, state)
+    }
+
     fn raw_brightness(&self, pos: BlockPos, sky_darkening: u8) -> u8 {
         let sky_light = if self.dimension_type.has_skylight {
             self.light_value_at(LightLayer::Sky, pos)
@@ -713,6 +721,10 @@ impl LevelReader for Arc<World> {
     ) -> bool {
         self.as_ref()
             .is_face_sturdy_for(state, pos, direction, support_type)
+    }
+
+    fn is_collision_shape_full_block(&self, state: BlockStateId, pos: BlockPos) -> bool {
+        self.as_ref().is_collision_shape_full_block(state, pos)
     }
 
     fn raw_brightness(&self, pos: BlockPos, sky_darkening: u8) -> u8 {
@@ -787,5 +799,42 @@ impl LevelAccessor for Arc<World> {
 
     fn game_event(&self, event: GameEventRef, pos: BlockPos, context: &GameEventContext<'_>) {
         World::game_event(self, event, pos, context);
+    }
+}
+
+impl ServerLevelAccessor for Arc<World> {
+    fn difficulty(&self) -> Difficulty {
+        self.as_ref().difficulty()
+    }
+
+    fn brightness(&self, layer: LightLayer, pos: BlockPos) -> u8 {
+        self.light_value_at(layer, pos)
+    }
+
+    fn is_thundering(&self) -> bool {
+        self.as_ref().is_thundering()
+    }
+
+    fn sky_darkening(&self) -> u8 {
+        self.as_ref().sky_darkening()
+    }
+
+    fn dimension_type(&self) -> DimensionTypeRef {
+        self.dimension_type
+    }
+
+    fn sea_level(&self) -> i32 {
+        self.sea_level
+    }
+
+    fn is_block_within_world_border(&self, pos: BlockPos) -> bool {
+        self.as_ref().is_block_within_world_border(pos)
+    }
+
+    fn has_nearby_non_creative_player(&self, position: DVec3, range: f64) -> bool {
+        self.nearest_player(position, range, |player| {
+            !player.is_spectator() && !player.has_infinite_materials()
+        })
+        .is_some()
     }
 }

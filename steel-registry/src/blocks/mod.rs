@@ -10,6 +10,7 @@ pub mod behavior;
 pub mod block_state_ext;
 pub mod properties;
 pub mod shapes;
+pub mod spawn_rule;
 
 use std::sync::OnceLock;
 

@@ -286,6 +286,7 @@ fn full_chunk_postprocessing_roundtrips_through_persistent_chunk() {
         Vec::new(),
         Vec::new(),
         pos,
+        0,
     );
 
     let loaded = ChunkStorage::persistent_to_chunk(
@@ -310,4 +311,32 @@ fn full_chunk_postprocessing_roundtrips_through_persistent_chunk() {
     };
 
     assert_eq!(prepared.persistent.postprocessing, vec![vec![packed]]);
+}
+
+#[test]
+fn inhabited_time_roundtrips_through_persistent_chunk() {
+    init_globals_once();
+
+    let pos = ChunkPos::new(3, -4);
+    let chunk = Chunk::new(single_empty_section(), pos, 0, 16, Weak::new());
+    chunk.increment_inhabited_time(1234);
+    let Some(prepared) = ChunkStorage::prepare_chunk_save(&chunk, ChunkStatus::Empty, &[], true)
+    else {
+        panic!("forced chunk save should produce a payload");
+    };
+
+    assert_eq!(prepared.persistent.inhabited_time, 1234);
+
+    let loaded = ChunkStorage::persistent_to_chunk(
+        &prepared.persistent,
+        pos,
+        ChunkStatus::Empty,
+        0,
+        16,
+        Weak::new(),
+    );
+
+    // Vanilla restores it with setInhabitedTime after construction rather than through the
+    // constructor, so a chunk that has never been saved reads 0 and a restored one reads its own.
+    assert_eq!(loaded.chunk.inhabited_time(), 1234);
 }

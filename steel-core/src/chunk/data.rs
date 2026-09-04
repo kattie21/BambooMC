@@ -2,7 +2,7 @@
 use std::fmt::{self, Formatter};
 use std::sync::{
     Arc, OnceLock, Weak,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicI64, Ordering},
 };
 
 use parking_lot::{MappedRwLockWriteGuard, RwLockReadGuard, RwLockWriteGuard};
@@ -111,6 +111,17 @@ pub struct Chunk {
     full_runtime: OnceLock<Box<FullChunkRuntime>>,
     /// Generator-owned state retained only between generation stages.
     transient_generation_state: SyncMutex<TransientGenerationState>,
+    /// Vanilla `ChunkAccess.inhabitedTime`: game ticks a player has spent near this chunk.
+    ///
+    /// Accrues one tick per game tick for every chunk the spawn collector returns, which is the
+    /// set of chunks close enough to a player to spawn mobs. `DifficultyInstance` reads it to
+    /// scale regional difficulty, so a chunk a player has camped in for hours produces better
+    /// equipped and more heavily buffed mobs than one they just walked into.
+    ///
+    /// Vanilla stores a plain `long` behind the level's single-threaded tick loop. Steel ticks
+    /// chunks off the main thread, so this is an atomic; the increment is a fetch-add rather than
+    /// a read-modify-write for the same reason.
+    inhabited_time: AtomicI64,
 }
 
 enum PendingPromotionCommit {
@@ -152,6 +163,7 @@ impl Chunk {
             light: SyncRwLock::new(ChunkLightData::for_valid_world_height(min_y, height)),
             full_runtime: OnceLock::new(),
             transient_generation_state: SyncMutex::new(TransientGenerationState::default()),
+            inhabited_time: AtomicI64::new(0),
         }
     }
 
@@ -214,6 +226,7 @@ impl Chunk {
             light: SyncRwLock::new(light),
             full_runtime: OnceLock::new(),
             transient_generation_state: SyncMutex::new(TransientGenerationState::default()),
+            inhabited_time: AtomicI64::new(0),
         };
 
         if status >= ChunkStatus::InitializeLight {
@@ -266,6 +279,30 @@ impl Chunk {
     /// Clears the dirty flag.
     pub fn clear_dirty(&self) {
         self.dirty.store(false, Ordering::Release);
+    }
+
+    /// Returns vanilla `ChunkAccess.getInhabitedTime`.
+    #[must_use]
+    pub fn inhabited_time(&self) -> i64 {
+        self.inhabited_time.load(Ordering::Acquire)
+    }
+
+    /// Applies vanilla `ChunkAccess.incrementInhabitedTime`.
+    ///
+    /// The delta is the ticks elapsed since the last spawn pass rather than a constant `1`,
+    /// because vanilla measures it against the game time and the tick loop can skip.
+    ///
+    /// Deliberately does **not** mark the chunk dirty, matching vanilla: `incrementInhabitedTime`
+    /// never calls `markUnsaved`. A chunk a player only stands in therefore accrues time that is
+    /// dropped if nothing else dirties it before unload, which is vanilla's behavior and not a
+    /// Steel gap — in practice a player near a chunk changes blocks or entities constantly.
+    pub fn increment_inhabited_time(&self, delta: i64) {
+        self.inhabited_time.fetch_add(delta, Ordering::AcqRel);
+    }
+
+    /// Applies vanilla `ChunkAccess.setInhabitedTime`, used when rehydrating from disk.
+    pub fn set_inhabited_time(&self, inhabited_time: i64) {
+        self.inhabited_time.store(inhabited_time, Ordering::Release);
     }
 
     /// Reads a block using coordinates relative to the chunk's minimum Y.
